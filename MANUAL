@@ -1,0 +1,6 @@
+nvcc -c fitTracks.cu (nvcc -c fitTracks.cu -Xptxas="-v" // verbose mode)
+rootcomp -c main.cpp
+g++ main.o fitTracks.o -o fitTracks `root-config --glibs --cflags --libs` -L/usr/local/cuda/lib64 -lcudart
+./fitTracks
+
+compare.cpp --- to compare the original and this approaches
