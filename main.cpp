@@ -90,10 +90,22 @@ int process()
 
         tracksToFit.insert(tracksToFit.end(), tmp.begin(), tmp.end());
     }
-
+    
     std::cout << "Old size: " << ntracks << " and new size: " << tracksToFit.size() << std::endl;
-
     ntracks = tracksToFit.size();
+
+    // Sort all vectors
+    /*
+    for (int i = 0; i < ntracks; i++)
+    {
+        recoHits = &tracks->at(tracksToFit.at(i).first)->_recoHits;
+        std::sort(tracksToFit.at(i).second.begin(), tracksToFit.at(i).second.end(),
+        [&recoHits](int l, int r){
+            return abs(recoHits->at(l)->_pos[2] < abs(recoHits->at(r)->_pos[2]));
+        });
+    }
+    */
+
     float* data = new float[ntracks * 4 * 3];
     int size = 0;
     for (int i = 0; i < ntracks; i++)
@@ -129,19 +141,6 @@ int process()
     std::cout << "time: " << duration.count()/1e6 << " sec" << std::endl;
     std::cout << "Finish cuda" << std::endl;
 
-    for (int i = 0; i < 20; i++)
-    {
-        int idx = i;
-        std::cout << idx << " (";
-        std::cout << tracksToFit.at(idx).first << ") ";
-        for (int j = 0; j < 5; j++)
-        {
-            std::cout << output[npars * idx + j] << " ";
-        }
-        std::cout << ", chiSquare: " << info[ninfo * idx] << ", abs sum Jacobian: " << info[ninfo * idx + 1] << ", init chiSquare: " << info[ninfo * idx + 2];
-        std::cout << std::endl;
-    }
-
     // Save data
     TFile* fout = new TFile("fout.root", "RECREATE");
     TTree* fitCuda = new TTree("fitCuda", "fit by CUDA");
@@ -161,6 +160,9 @@ int process()
             while (trkID < ntracks - 1 && tracksToFit.at(trkID).first == tracksToFit.at(trkID + 1).first)
             {
                 ++trkID;
+                if (std::isnan(info[ninfo * trkID]) || info[ninfo * trkID] < 0)
+                    continue;
+
                 if (bestChi > info[ninfo * trkID])
                 {
                     bestID = trkID;
@@ -185,15 +187,29 @@ int process()
     fitCuda->Write();
 
     // Vizualization
-    for (int trkID = 0; trkID < 20; trkID++)
+    for (int trkID = 300; trkID < 400; trkID++)
     {
-        TCanvas c(Form("c%d", trkID), Form("c%d", trkID), 900, 900);
+        std::cout << trkID << " (";
+        std::cout << tracksToFit.at(trkID).first << ") ";
+        for (int j = 0; j < 5; j++)
+            std::cout << output[npars * trkID + j] << " ";
+
+        std::cout << ", chiSquare: " << info[ninfo * trkID] << ", abs sum Jacobian: " << info[ninfo * trkID + 1] << ", init chiSquare: " << info[ninfo * trkID + 2];
+        std::cout << std::endl;
+
+        TCanvas c(Form("c%d_%d", trkID, tracksToFit.at(trkID).first), Form("c%d", trkID), 900, 900);
 
         float x0 = output[npars * trkID];
         float y0 = output[npars * trkID + 1];
         float z0 = output[npars * trkID + 2];
         float R = output[npars * trkID + 3];
         float V = output[npars * trkID + 4];
+
+        TGraph2D graphBox(2);
+        graphBox.SetName("box");
+        graphBox.SetPoint(0, -400, -400, -200);
+        graphBox.SetPoint(1, 400, 400, 200);
+        graphBox.Draw("P");
 
         TGraph2D graphB(100);
         graphB.SetName("beam trajectory");
@@ -208,15 +224,13 @@ int process()
         graphB.SetLineColor(kBlue);
         graphB.SetMinimum(-200.);
         graphB.SetMaximum(200.);
-        graphB.GetXaxis()->SetLimits(-400, 400);
-        graphB.GetYaxis()->SetLimits(-400, 400);
-        graphB.Draw("LINE");
+        graphB.Draw("LINE""SAME");
 
         TGraph2D graph2(100);
         graph2.SetName("trajectory");
         for (int j = 0; j <= 100; j++)
         {
-            double t = -TMath::Pi() + j/100. * 2 * TMath::Pi();
+            double t = -2 * TMath::Pi() + j/100. * 6 * TMath::Pi();
             double x = x0 + R * cos(-t);
             double y = y0 + R * sin(-t);
             double z = z0 + V * t;

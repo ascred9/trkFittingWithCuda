@@ -12,6 +12,10 @@
 
 #define ADD_ALIGNMENT false 
 
+#define ADD_V_CONSTR false
+
+#define FIX_VERT true 
+
 cudaError_t errCode;
 
 typedef struct{
@@ -23,6 +27,10 @@ typedef struct{
     // [d2/(dy0 dx0) d2/(dy0 dy0) ...]
     float elements[5][5]; 
 } Hessian;
+
+__device__ float getT(float xi, float yi, float zi, float x0, float y0, float z0, float R, float V, bool& intersection, bool& plus);
+
+__device__ void correctPeriod(float zi, float z0, float V, float& t);
 
 __device__ bool calculateCircle(float x1, float y1, float x2, float y2, float x3, float y3, float& x0, float& y0, float& R)
 {
@@ -92,6 +100,7 @@ __device__ bool calculatePrelimPars(int tId, const float* data, float* output)
 
     count = 0;
     float V = 0;
+    bool intersection, plus;
     for (int i = 0; i < nPoints - 1; i++)
     {
         float xi = data[nVars * tId + 3 * i], yi = data[nVars * tId + 3 * i + 1], zi = data[nVars * tId + 3 * i + 2];
@@ -99,21 +108,18 @@ __device__ bool calculatePrelimPars(int tId, const float* data, float* output)
         {
             float xj = data[nVars * tId + 3 * j], yj = data[nVars * tId + 3 * j + 1], zj = data[nVars * tId + 3 * j + 2];
 
-            float csi = (xi - x0) / sqrtf(powf(xi - x0, 2) + powf(yi - y0, 2));
-            float sni = (yi - y0) / sqrtf(powf(xi - x0, 2) + powf(yi - y0, 2));
+            float ti = getT(xi, yi, zi, x0, y0, 0, R, 0, intersection, plus);
+            float tj = getT(xj, yj, zj, x0, y0, 0, R, 0, intersection, plus);
 
-            float csj = (xj - x0) / sqrtf(powf(xj - x0, 2) + powf(yj - y0, 2));
-            float snj = (yj - y0) / sqrtf(powf(xj - x0, 2) + powf(yj - y0, 2));
-
-            if (abs(csi * csj + sni * snj) > 1)
+            float deltaT = tj - ti;
+            if (abs(deltaT) < epsilon)
                 continue;
+            
+            if (deltaT < 0)
+                deltaT += 2 * M_PI;
 
-            float deltaPhi = (csj * sni - csi * snj > 0 ? 1. : -1.) * acosf(csi * csj + sni * snj);
+            V += (zj - zi) / deltaT;
 
-            if (abs(deltaPhi) < epsilon) // two similar hits on the same vane
-                continue;
-
-            V += (zj - zi) / deltaPhi;
             count++;
         }
     }
@@ -128,8 +134,9 @@ __device__ bool calculatePrelimPars(int tId, const float* data, float* output)
     for (int i = 0; i < nPoints; i++)
     {
         float xi = data[nVars * tId + 3 * i], yi = data[nVars * tId + 3 * i + 1], zi = data[nVars * tId + 3 * i + 2];
-        float phi = -atan2f(yi - y0, xi - x0); // [-pi, +pi], but reverse parametrization
-        z0 += zi - V * phi;
+        //float phi = -atan2f(yi - y0, xi - x0); // [-pi, +pi], but reverse parametrization
+        float t = getT(xi, yi, zi, x0, y0, 0, R, 0, intersection, plus);
+        z0 += zi - V * t;
         count++;
     }
 
@@ -187,6 +194,23 @@ __device__ float getT(float xi, float yi, float zi, float x0, float y0, float z0
     return t;
 }
 
+__device__ void correctPeriod(float zi, float z0, float V, float& t)
+{
+    int period = 0;
+    float delta = abs(zi - z0);
+    for (int n = -1; n < 1; n++)
+    {
+        float tmp = abs(zi - z0 - V * (t + 2 * M_PI * n));
+        if (tmp < delta)
+        {
+            delta = tmp;
+            period = n;
+        }
+    }
+
+    t += 2 * M_PI * period;
+}
+
 __device__ float getChiSquare(int tId, const float* data, const float* output, const float constr_resolution)
 {
     // sum_i( (xi - x(ti))^2 + (yi - y(ti))^2 + (zi - z(ti))^2)
@@ -211,6 +235,8 @@ __device__ float getChiSquare(int tId, const float* data, const float* output, c
         float zi = data[nVars * tId + i * 3 + 2];
 
         t = getT(xi, yi, zi, x0, y0, z0, R, V, intersection, plus);
+        correctPeriod(zi, z0, V, t);
+
         dx2 = (x0 + R * cosf(-t) - xi) * (x0 + R * cosf(-t) - xi);
         dy2 = (y0 + R * sinf(-t) - yi) * (y0 + R * sinf(-t) - yi);
         dz2 = (z0 + V * t - zi) * (z0 + V * t - zi);
@@ -220,6 +246,7 @@ __device__ float getChiSquare(int tId, const float* data, const float* output, c
 
     int ndf = 3 * nPoints - nPars - 1;
     chi /= (ndf * resolution * resolution);
+
     if (ADD_CONSTRAINT)
     {
         float delta = (BEAM_ORBIT * BEAM_ORBIT - (x0 * x0 + y0 * y0 + R * R)) / (constr_resolution * constr_resolution);
@@ -239,6 +266,11 @@ __device__ float getChiSquare(int tId, const float* data, const float* output, c
         }
         chiPart2 *= chiPart2 / (ndf * resolution * resolution);
         chi += chiPart2;
+    }
+
+    if (ADD_V_CONSTR)
+    {    
+        chi -= V * V / (constr_resolution * constr_resolution);
     }
 
     return chi;
@@ -268,6 +300,8 @@ __device__ bool calcJacobian(int tId, const float* data, const float* output, co
 
         bool intersection, plus;
         float t = getT(xi, yi, zi, x0, y0, z0, R, V, intersection, plus);
+        correctPeriod(zi, z0, V, t);
+
         float x = x0 + R * cos(-t);
         float y = y0 + R * sin(-t);
         float z = z0 + V * t;
@@ -328,6 +362,29 @@ __device__ bool calcJacobian(int tId, const float* data, const float* output, co
         jac.elements[3] -= chiPart2 * nPoints;
     }
 
+    if (ADD_V_CONSTR)
+    {
+        float minT = 0, maxT = 0;
+        for (int i = 0; i < nPoints; i++)
+        {
+            float xi = data[nVars * tId + i * 3];
+            float yi = data[nVars * tId + i * 3 + 1];
+            float zi = data[nVars * tId + i * 3 + 2];
+
+            bool intersection, plus;
+            float t = getT(xi, yi, zi, x0, y0, z0, R, V, intersection, plus);
+            correctPeriod(zi, z0, V, t);
+            if (minT > t || i == 0)
+                minT = t;
+
+            if (maxT < t || i == 0)
+                maxT = t;
+        }
+
+        int nPeriods = (maxT - minT) / (2 * M_PI);
+        jac.elements[4] += (V  * V * nPeriods * nPeriods) / (constr_resolution * constr_resolution);
+    }
+
 
     return true;
 }
@@ -356,6 +413,7 @@ __device__ bool calcHessian(int tId, const float* data, const float* output, Hes
 
         bool intersection, plus;
         float t = getT(xi, yi, zi, x0, y0, z0, R, V, intersection, plus);
+
         float x = x0 + R * cos(-t);
         float y = y0 + R * sin(-t);
         float z = z0 + V * t;
@@ -435,6 +493,8 @@ __global__ void prepareTracks_kernel(const float* data, int size, float* output,
         info[ninfo * tId + 1] = -1;
         return;
     }
+
+    if (tId == 90) printf("%f\n", output[5 * 90 + 4]);
 }
     
 __global__ void fitTracks_kernel(const float* data, int size, float* output, float* info)
@@ -452,7 +512,7 @@ __global__ void fitTracks_kernel(const float* data, int size, float* output, flo
         return;
 
     float step = 1e-1;
-    float constr_res = 1e3;
+    float constr_res = 1e2;
 
     const int nPars = 5;
     float chiInit = getChiSquare(tId, data, output, constr_res);
@@ -480,6 +540,38 @@ __global__ void fitTracks_kernel(const float* data, int size, float* output, flo
             if (constr_res < 1) // reduce before 1 mm resolution
                 constr_res = 1;
         }
+    }
+    
+    if (FIX_VERT)
+    {
+        int nPoints = 4;
+        int nVars = 12;
+        float tMax, tMin, zMax, zMin;
+        bool intersection, plus;
+        for (int i = 0; i < nPoints; i++)
+        {
+            float x0 = output[nPars * tId + 0], y0 = output[nPars * tId + 1], z0 = output[nPars * tId + 2];
+            float R = output[nPars * tId + 3], V = output[nPars * tId + 4];
+            float xi = data[nVars * tId + 3 * i], yi = data[nVars * tId + 3 * i + 1], zi = data[nVars * tId + 3 * i + 2];
+            float t = getT(xi, yi, zi, x0, y0, z0, R, V, intersection, plus);
+            correctPeriod(zi, z0, V, t);
+            if (i == 0 || tMin > t)
+            {
+                tMin = t;
+                zMin = zi;
+            }
+
+            if (i == 0 || tMax < t)
+            {
+                tMax = t;
+                zMax = zi;
+            }
+        }
+
+        float dt = (tMax - tMin) - int( (tMax - tMin) / (2 * M_PI) ) * 2 * M_PI;
+        output[nPars * tId + 4] = (zMax - zMin) / dt;
+        output[nPars * tId + 2] = zMax - tMax * output[nPars * tId + 4];
+        chiCur = getChiSquare(tId, data, output, constr_res);
     }
 
     info[ninfo * tId] = chiCur;
